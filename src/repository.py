@@ -55,6 +55,23 @@ class SQLiteRepository:
                     PRIMARY KEY(actor_id, idem_key)
                 );
             """)
+            self._backfill_checkpoints(connection)
+
+    def _backfill_checkpoints(self, connection):
+        """Upgrade historical observations that predate the checkpoint feature.
+
+        Observations without a checkpoint record are backfilled to
+        ``not_started`` so the resume workflow can distinguish records that
+        have never reported a fault from those that have.
+        """
+        connection.execute(
+            """
+            UPDATE entities
+            SET data = json_set(data, '$.checkpoint.status', 'not_started')
+            WHERE kind = 'observation'
+              AND json_extract(data, '$.checkpoint.status') IS NULL
+            """
+        )
 
     @staticmethod
     def _entity_from_row(row):

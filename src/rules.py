@@ -79,7 +79,68 @@ def _validate_observation(actor, data, lookup):
         raise ValidationError("telescope does not exist")
     if str(data.get("start_at")) >= str(data.get("end_at")):
         raise ValidationError("observation end must be after start")
-    return {"scheduled_team": data.get("team_id")}
+    return {
+        "scheduled_team": data.get("team_id"),
+        "checkpoint": {"status": "not_started"},
+    }
+
+
+def _validate_frame(actor, data, lookup):
+    if not _find_one(lookup, "observation", "id", data.get("observation_id")):
+        raise ValidationError("observation does not exist")
+    try:
+        frame_index = int(data.get("frame_index"))
+    except (TypeError, ValueError):
+        raise ValidationError("frame_index must be a positive integer")
+    if frame_index < 1:
+        raise ValidationError("frame_index must be a positive integer")
+    observed_at = str(data.get("observed_at", "")).strip()
+    if not observed_at:
+        raise ValidationError("observed_at is required")
+    return {}
+
+
+def _validate_report_fault(actor, entity, data, lookup):
+    if entity["status"] == "interrupted":
+        checkpoint = entity["data"].get("checkpoint") or {}
+        same = (
+            int(checkpoint.get("frames_collected", -1)) == int(data.get("frames_collected", -2))
+            and str(checkpoint.get("lock_lost_at") or "") == str(data.get("lock_lost_at") or "")
+            and str(checkpoint.get("fault_reason") or "") == str(data.get("fault_reason") or "")
+        )
+        if not same:
+            raise ConflictError("observation already interrupted with a different checkpoint")
+        return {}
+    frames = data.get("frames_collected")
+    try:
+        frames = int(frames)
+    except (TypeError, ValueError):
+        raise ValidationError("frames_collected must be a non-negative integer")
+    if frames < 0:
+        raise ValidationError("frames_collected must be a non-negative integer")
+    lock_lost_at = str(data.get("lock_lost_at", "")).strip()
+    if not lock_lost_at:
+        raise ValidationError("lock_lost_at is required")
+    start_at = str(entity["data"].get("start_at"))
+    end_at = str(entity["data"].get("end_at"))
+    if not (start_at < lock_lost_at < end_at):
+        raise ValidationError("lock_lost_at must be within the observation window")
+    fault_reason = str(data.get("fault_reason", "")).strip()
+    if not fault_reason:
+        raise ValidationError("fault_reason is required")
+    return {
+        "checkpoint": {
+            "status": "interrupted",
+            "frames_collected": frames,
+            "lock_lost_at": lock_lost_at,
+            "fault_reason": fault_reason,
+            "reported_by": actor.user_id,
+            "original_start_at": start_at,
+            "original_end_at": end_at,
+            "collected_start_at": start_at,
+            "collected_end_at": lock_lost_at,
+        }
+    }
 
 
 def _validate_merge_measurement(actor, entity, data, lookup):
@@ -154,12 +215,14 @@ class RuleEngine:
         "candidates": "candidate",
         "telescopes": "telescope",
         "observations": "observation",
+        "frames": "frame",
     }
     INITIAL_STATUS = {
         "source": "registered",
         "candidate": "detected",
         "telescope": "available",
         "observation": "requested",
+        "frame": "recorded",
     }
     TRANSITIONS = {
         "source": {
@@ -181,6 +244,7 @@ class RuleEngine:
         "observation": {
             "schedule": (("requested",), "scheduled"),
             "complete": (("scheduled",), "completed"),
+            "report_fault": (("scheduled", "interrupted"), "interrupted"),
             "withdraw": (("requested", "scheduled"), "withdrawn"),
             "correct": (("requested", "scheduled"), "requested"),
         },
@@ -190,6 +254,7 @@ class RuleEngine:
         "candidate": ("source_id", "event_id", "ra", "dec", "magnitude", "transient_type", "observed_at"),
         "telescope": ("name", "aperture_m", "site_name"),
         "observation": ("candidate_id", "telescope_id", "team_id", "start_at", "end_at", "mode"),
+        "frame": ("observation_id", "frame_index", "observed_at"),
     }
     ACTION_REQUIRED = {
         ("source", "retire"): ("reason",),
@@ -201,6 +266,7 @@ class RuleEngine:
         ("candidate", "classify"): ("classification",),
         ("telescope", "restrict"): ("reason",),
         ("observation", "schedule"): ("operator_id",),
+        ("observation", "report_fault"): ("frames_collected", "lock_lost_at", "fault_reason"),
         ("observation", "withdraw"): ("reason",),
         ("observation", "correct"): ("reason",),
     }
@@ -209,6 +275,7 @@ class RuleEngine:
         "candidate": ("analyst", "operator", "admin"),
         "telescope": ("coordinator", "admin"),
         "observation": ("analyst", "coordinator", "admin"),
+        "frame": ("operator", "coordinator", "admin"),
     }
     ROLE_ACTIONS = {
         "activate": ("coordinator", "admin"),
@@ -223,12 +290,14 @@ class RuleEngine:
         "restore": ("coordinator", "admin"),
         "schedule": ("coordinator", "admin"),
         "complete": ("operator", "coordinator", "admin"),
+        "report_fault": ("operator", "coordinator", "admin"),
     }
     CUSTOM_CREATE = {
         "source": _validate_source,
         "candidate": _validate_candidate,
         "telescope": _validate_telescope,
         "observation": _validate_observation,
+        "frame": _validate_frame,
     }
     CUSTOM_TRANSITIONS = {
         ("candidate", "merge_measurement"): _validate_merge_measurement,
@@ -236,6 +305,7 @@ class RuleEngine:
         ("candidate", "correct"): _validate_correct,
         ("observation", "schedule"): _validate_schedule,
         ("observation", "correct"): _validate_correct,
+        ("observation", "report_fault"): _validate_report_fault,
     }
 
     def normalize_kind(self, kind):
