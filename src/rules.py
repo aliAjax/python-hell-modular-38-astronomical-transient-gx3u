@@ -79,7 +79,7 @@ def _validate_observation(actor, data, lookup):
         raise ValidationError("telescope does not exist")
     if str(data.get("start_at")) >= str(data.get("end_at")):
         raise ValidationError("observation end must be after start")
-    return {"scheduled_team": data.get("team_id")}
+    return {"scheduled_team": data.get("team_id"), "checkpoint": {"state": "not_started"}}
 
 
 def _validate_merge_measurement(actor, entity, data, lookup):
@@ -148,6 +148,37 @@ def _validate_schedule(actor, entity, data, lookup):
     return {"scheduled_by": actor.user_id}
 
 
+def _validate_report_failure(actor, entity, data, lookup):
+    """Split the original window at the lock-loss moment into acquired and remainder parts."""
+    try:
+        frames_acquired = int(data.get("frames_acquired"))
+    except (TypeError, ValueError):
+        raise ValidationError("frames_acquired must be a non-negative integer")
+    if frames_acquired < 0:
+        raise ValidationError("frames_acquired must be a non-negative integer")
+    start_at = str(entity["data"].get("start_at"))
+    end_at = str(entity["data"].get("end_at"))
+    failed_at = str(data.get("failed_at"))
+    if not (start_at < failed_at < end_at):
+        raise ValidationError("failed_at must fall inside the observation window")
+    fault_reason = str(data.get("fault_reason", "")).strip()
+    if not fault_reason:
+        raise ValidationError("fault_reason is required")
+    return {
+        "frames_acquired": frames_acquired,
+        "failed_at": failed_at,
+        "fault_reason": fault_reason,
+        "reported_by": actor.user_id,
+        "checkpoint": {
+            "state": "failed",
+            "frames_acquired": frames_acquired,
+            "failed_at": failed_at,
+            "fault_reason": fault_reason,
+            "reported_by": actor.user_id,
+        },
+    }
+
+
 class RuleEngine:
     ALIASES = {
         "sources": "source",
@@ -181,6 +212,7 @@ class RuleEngine:
         "observation": {
             "schedule": (("requested",), "scheduled"),
             "complete": (("scheduled",), "completed"),
+            "report_failure": (("scheduled",), "interrupted"),
             "withdraw": (("requested", "scheduled"), "withdrawn"),
             "correct": (("requested", "scheduled"), "requested"),
         },
@@ -201,6 +233,7 @@ class RuleEngine:
         ("candidate", "classify"): ("classification",),
         ("telescope", "restrict"): ("reason",),
         ("observation", "schedule"): ("operator_id",),
+        ("observation", "report_failure"): ("frames_acquired", "failed_at", "fault_reason"),
         ("observation", "withdraw"): ("reason",),
         ("observation", "correct"): ("reason",),
     }
@@ -223,6 +256,7 @@ class RuleEngine:
         "restore": ("coordinator", "admin"),
         "schedule": ("coordinator", "admin"),
         "complete": ("operator", "coordinator", "admin"),
+        "report_failure": ("operator", "admin"),
     }
     CUSTOM_CREATE = {
         "source": _validate_source,
@@ -235,6 +269,7 @@ class RuleEngine:
         ("candidate", "reclassify"): _validate_reclassify,
         ("candidate", "correct"): _validate_correct,
         ("observation", "schedule"): _validate_schedule,
+        ("observation", "report_failure"): _validate_report_failure,
         ("observation", "correct"): _validate_correct,
     }
 

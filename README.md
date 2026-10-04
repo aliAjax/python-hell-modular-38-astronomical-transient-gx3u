@@ -2,6 +2,8 @@
 
 只使用Python标准库和SQLite的模块化服务，默认端口`8338`。支持全天巡天来源、候选事件去重、坐标与亮度测量合并、优先级计算、观测申请、望远镜排程、撤回、重分类、修正、观测队冲突、角色权限和审计。
 
+观测执行到一半跟踪失锁时支持断点续观：操作员通过`report_failure`登记已采帧数与失锁时刻，系统按原窗口切出已采时段（`completed`段，帧入库）与剩余时段（`requested`回到待排），原观测转为`interrupted`并保留故障原因、操作者与原申请人。协调员对剩余时段重新`schedule`，仍受望远镜与观测队空闲约束；同一观测的故障结果只接受一份，重复上报会因版本或状态变化被拒绝，已入库的帧不会重复。历史数据在升级时自动回填检查点为未开始。
+
 ## 模块结构
 
 - `app.py`：参数解析、依赖组装和服务生命周期。
@@ -28,6 +30,7 @@ python3 app.py --db ./data.db --port 8338
 - `GET /health`
 - `GET /api/<kind>`，可用`?status=`过滤
 - `GET /api/entities/<id>`
+- `GET /api/entities/<id>/checkpoint`，观测故障检查点
 - `POST /api/<kind>`
 - `POST /api/entities/<id>/actions`
 - `GET /api/audit`
